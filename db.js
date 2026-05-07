@@ -13,13 +13,13 @@ module.exports.CreateDB = function(meshserver) {
     var obj = {};
     var NEMongo = require(__dirname + '/nemongo.js');
     module.paths.push(require('path').join(meshserver.parentpath, 'node_modules')); // we need to push the node_modules folder for nedb
-    obj.dbVersion = 1;
-    
+    obj.dbVersion = 2;
+
     obj.initFunctions = function () {
         obj.updateDBVersion = function(new_version) {
           return obj.fdFile.updateOne({type: "db_version"}, { $set: {version: new_version} }, {upsert: true});
         };
-        
+
         obj.getDBVersion = function() {
             return new Promise(function(resolve, reject) {
                 obj.fdFile.find( { type: "db_version" } ).project( { _id: 0, version: 1 } ).toArray(function(err, vers){
@@ -38,9 +38,34 @@ module.exports.CreateDB = function(meshserver) {
                 { serverpath: 1, clientpath: 1, filesize: 1 }
             ).toArray();
         };
+        obj.getFileMapsForNodeOrMesh = function(node, mesh) {
+            return obj.fdFile.find(
+                { type: 'map', $or: [ { node: node }, { mesh: mesh } ] }
+            ).sort(
+                { serverpath: 1, clientpath: 1 }
+            ).toArray()
+            .then(function(rows) {
+                return rows.map(function(r) {
+                    return {
+                        _id: r._id,
+                        serverpath: r.serverpath,
+                        clientpath: r.clientpath,
+                        filesize: r.filesize,
+                        mesh: r.mesh,
+                        node: r.node,
+                        scope: r.mesh ? 'group' : 'device'
+                    };
+                });
+            });
+        };
         obj.findFileForNode = function(node, cpath) {
             return obj.fdFile.find(
                 { type: 'map', node: node, clientpath: cpath }
+            ).toArray();
+        };
+        obj.findFileForMeshClientPath = function(mesh, cpath) {
+            return obj.fdFile.find(
+                { type: 'map', mesh: mesh, clientpath: cpath }
             ).toArray();
         };
         obj.getServerFiles = function() {
@@ -57,13 +82,47 @@ module.exports.CreateDB = function(meshserver) {
                 filesize: filesize
             });
         };
-        obj.getNodesForServerPath = function(serverpath, nodeScope) {
-            if (nodeScope == null || !Array.isArray(nodeScope)) {
-              nodeScope = [];
-            }
+        obj.addMeshFileMap = function (meshId, spath, cpath, filesize) {
+            return obj.fdFile.insertOne({
+                type: 'map',
+                mesh: meshId,
+                serverpath: spath,
+                clientpath: cpath,
+                filesize: filesize
+            });
+        };
+        // Returns the list of distribution targets (one per online node) for a serverpath.
+        // Expands mesh-keyed records into synthetic per-node entries against `meshOfNode`,
+        // a { nodeId -> dbMeshKey } map of currently-online agents.
+        obj.getNodesForServerPath = function(serverpath, nodeScope, meshOfNode) {
+            if (nodeScope == null || !Array.isArray(nodeScope)) { nodeScope = []; }
+            if (meshOfNode == null) { meshOfNode = {}; }
             return obj.fdFile.find(
-                { type: 'map', serverpath: serverpath, node: { $in: nodeScope } }
-            ).toArray();
+                { type: 'map', serverpath: serverpath }
+            ).toArray()
+            .then(function(rows) {
+                var out = [];
+                rows.forEach(function(r) {
+                    if (r.node && nodeScope.indexOf(r.node) !== -1) {
+                        out.push(r);
+                    } else if (r.mesh) {
+                        nodeScope.forEach(function(nid) {
+                            if (meshOfNode[nid] === r.mesh) {
+                                out.push({
+                                    _id: r._id,
+                                    type: 'map',
+                                    node: nid,
+                                    mesh: r.mesh,
+                                    serverpath: r.serverpath,
+                                    clientpath: r.clientpath,
+                                    filesize: r.filesize
+                                });
+                            }
+                        });
+                    }
+                });
+                return out;
+            });
         };
         obj.update = function(id, args) {
             id = formatId(id);
@@ -96,13 +155,14 @@ module.exports.CreateDB = function(meshserver) {
               // Check if we need to reset indexes
               var indexesByName = {}, indexCount = 0;
               for (var i in indexes) { indexesByName[indexes[i].name] = indexes[i]; indexCount++; }
-              if ((indexCount != 3) || (indexesByName['Node1'] == null) || (indexesByName['ServerPath1'] == null)) {
+              if ((indexCount != 4) || (indexesByName['Node1'] == null) || (indexesByName['ServerPath1'] == null) || (indexesByName['Mesh1'] == null)) {
                   // Reset all indexes
                   console.log('Resetting plugin (FileDistribution) indexes...');
                   obj.fdFile.dropIndexes(function (err) {
                       obj.fdFile.createIndex({ serverpath: 1 }, { name: 'ServerPath1' });
                       obj.fdFile.createIndex({ node: 1 }, { name: 'Node1' });
-                  }); 
+                      obj.fdFile.createIndex({ mesh: 1 }, { name: 'Mesh1' });
+                  });
               }
           });
           
@@ -124,6 +184,7 @@ module.exports.CreateDB = function(meshserver) {
             obj.fdFilex.setAutocompactionInterval(40000);
             obj.fdFilex.ensureIndex({ fieldName: 'serverpath' });
             obj.fdFilex.ensureIndex({ fieldName: 'node' });
+            obj.fdFilex.ensureIndex({ fieldName: 'mesh' });
         }
         obj.fdFile = new NEMongo(obj.fdFilex);
         formatId = function(id) { return id; };
