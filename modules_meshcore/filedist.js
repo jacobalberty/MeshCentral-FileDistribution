@@ -29,6 +29,22 @@ var dbg = function(str) {
 
 if (periodicFileIntegrityTimer == null) { periodicFileIntegrityTimer = setInterval(verifyFiles, 1*60*1000*20); } // 20 minute(s)
 
+// MeshAgent's fs.mkdirSync only creates a single directory level (its options
+// argument is ignored), so walk up to the first existing parent and unwind,
+// creating each segment ourselves.
+function ensureDirExists(dir) {
+    if (!dir) return;
+    try { if (fs.existsSync(dir)) return; } catch (e) { /* try mkdir anyway */ }
+    var sep = Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\'));
+    if (sep > 0) ensureDirExists(dir.substring(0, sep));
+    try {
+        fs.mkdirSync(dir);
+    } catch (e) {
+        try { if (fs.existsSync(dir)) return; } catch (ee) {}
+        dbg('ensureDirExists: mkdir failed for ' + dir + ': ' + e);
+    }
+}
+
 Array.prototype.remove = function(from, to) {
   var rest = this.slice((to || from) + 1 || this.length);
   this.length = from < 0 ? this.length + from : from;
@@ -77,6 +93,10 @@ function consoleaction(args, rights, sessionid, parent) {
                     return;
                 }
                 if (fileBuffer[fn] == null) {
+                    var sep = Math.max(fn.lastIndexOf('/'), fn.lastIndexOf('\\'));
+                    if (sep > 0) {
+                        ensureDirExists(fn.substring(0, sep));
+                    }
                     fileBuffer[fn] = fs.createWriteStream(fn, { flags: 'wb' });
                 }
                 
